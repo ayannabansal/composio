@@ -50,6 +50,19 @@ const rejectionCases: ReadonlyArray<RejectionCase> = [
     value: 7,
   },
   {
+    name: 'oneOf beside object properties still rejects a value matching two branches',
+    schema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+      oneOf: [
+        { properties: { email: { type: 'string' } }, required: ['email'] },
+        { properties: { phone: { type: 'string' } }, required: ['phone'] },
+      ],
+    },
+    value: { message: 'hi', email: 'a@b.co', phone: '123' },
+  },
+  {
     name: 'not must compose with adjacent assertions',
     schema: { type: 'string', minLength: 2, not: { const: 'x' } },
     value: 'a',
@@ -183,6 +196,42 @@ const acceptanceCases: ReadonlyArray<AcceptanceCase> = [
     value: { a: 'ready', b: 'set' },
   },
   {
+    name: 'object properties accept the keys a sibling oneOf branch declares',
+    schema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+      oneOf: [
+        { properties: { email: { type: 'string' } }, required: ['email'] },
+        { properties: { phone: { type: 'string' } }, required: ['phone'] },
+      ],
+    },
+    value: { message: 'hi', email: 'a@b.co' },
+  },
+  {
+    name: 'object properties accept the keys a sibling anyOf branch declares',
+    schema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+      anyOf: [
+        { properties: { email: { type: 'string' } }, required: ['email'] },
+        { properties: { phone: { type: 'string' } }, required: ['phone'] },
+      ],
+    },
+    value: { message: 'hi', phone: '123' },
+  },
+  {
+    name: 'object properties accept the keys a sibling allOf branch declares',
+    schema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+      allOf: [{ properties: { email: { type: 'string' } }, required: ['email'] }],
+    },
+    value: { message: 'hi', email: 'a@b.co' },
+  },
+  {
     name: 'nested typeless object assertions accept non-object property values',
     schema: {
       type: 'object',
@@ -247,6 +296,23 @@ describe.each(builders)('whole-schema semantic regressions ($name)', builder => 
 
     expect(parsed.parse({ a: 'ready' })).toEqual({ a: 'ready', b: 'set' });
     expect(parsed.safeParse({ a: 'ready', c: 1 }).success).toBe(false);
+  });
+
+  it('stays strict over the union of object properties and sibling composition keys', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+      anyOf: [
+        { properties: { email: { type: 'string' } }, required: ['email'] },
+        { properties: { phone: { type: 'string', default: '000' } } },
+      ],
+    };
+    const parsed = builder.convert(schema);
+
+    expect(parsed.parse({ message: 'hi' })).toEqual({ message: 'hi', phone: '000' });
+    expect(parsed.safeParse({ message: 'hi', email: 'a@b.co', extra: 1 }).success).toBe(false);
+    expect(parsed.safeParse({ email: 'a@b.co' }).success).toBe(false);
   });
 
   it('normalizes Draft 4 exclusive bounds before the whole-schema guard runs', () => {

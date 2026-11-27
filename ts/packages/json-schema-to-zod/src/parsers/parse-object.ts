@@ -1,10 +1,10 @@
-import { parseAllOf } from './parse-all-of';
+import { isClosedObjectBranch, parseAllOf } from './parse-all-of';
 import { parseAnyOf } from './parse-any-of';
 import { parseOneOf } from './parse-one-of';
 import { parseSchema } from './parse-schema';
 import { applyPropertyPresence } from './property-presence';
 import type { ParseContext } from '../context';
-import type { JsonSchemaObject } from '../types';
+import type { JsonSchema, JsonSchemaObject } from '../types';
 import { compilePattern } from '../utils/compile-pattern';
 import { its } from '../utils/its';
 
@@ -138,6 +138,14 @@ function parseDynamicKeyObject<S>(
   });
 }
 
+/** A typeless composition branch that carries object keywords is an object. */
+const asObjectBranch = (branch: JsonSchema): JsonSchema =>
+  typeof branch === 'object' &&
+  !branch.type &&
+  (branch.properties ?? branch.additionalProperties ?? branch.patternProperties)
+    ? { ...branch, type: 'object' }
+    : branch;
+
 export function parseObject<S>(
   objectSchema: JsonSchemaObject & { type?: 'object' },
   ctx: ParseContext<S>
@@ -162,6 +170,27 @@ export function parseObject<S>(
   // Track if additionalProperties was explicitly set to true
   const isAdditionalPropertiesTrue = normalizedSchema.additionalProperties === true;
 
+  const anyOf = its.an.anyOf(objectSchema) ? objectSchema.anyOf.map(asObjectBranch) : undefined;
+  const oneOf = its.a.oneOf(objectSchema) ? objectSchema.oneOf.map(asObjectBranch) : undefined;
+  const allOf = its.an.allOf(objectSchema) ? objectSchema.allOf.map(asObjectBranch) : undefined;
+
+  // A strict parent and a strict composition branch reject each other's keys,
+  // which leaves the intersection unsatisfiable. When both sides are closed
+  // only by the named-property default, each is materialized open and the
+  // strictness is re-applied once over the union of the keys they declare.
+  const closedBranches = [...(anyOf ?? []), ...(oneOf ?? []), ...(allOf ?? [])].filter(
+    isClosedObjectBranch
+  );
+  const sharesKeysWithBranches =
+    shape !== undefined &&
+    !hasPatternProperties &&
+    additionalProperties === undefined &&
+    closedBranches.length > 0;
+  const open = (branch: JsonSchema): JsonSchema =>
+    sharesKeysWithBranches && isClosedObjectBranch(branch)
+      ? { ...branch, additionalProperties: true }
+      : branch;
+
   let output: S;
   if (hasPatternProperties) {
     output = parseDynamicKeyObject(normalizedSchema, shape, additionalProperties, ctx);
@@ -178,7 +207,7 @@ export function parseObject<S>(
     } else {
       // Named properties with an omitted `additionalProperties` stay strict for
       // tool inputs, even though JSON Schema itself would allow unknown keys.
-      output = backend.object(shape, { kind: 'strict' });
+      output = backend.object(shape, { kind: sharesKeysWithBranches ? 'loose' : 'strict' });
     }
   } else {
     if (additionalProperties) {
@@ -198,61 +227,43 @@ export function parseObject<S>(
     }
   }
 
-  if (its.an.anyOf(objectSchema)) {
+  if (anyOf) {
     output = backend.intersection(
       output,
-      parseAnyOf(
-        {
-          ...objectSchema,
-          anyOf: objectSchema.anyOf.map(x =>
-            typeof x === 'object' &&
-            !x.type &&
-            (x.properties ?? x.additionalProperties ?? x.patternProperties)
-              ? { ...x, type: 'object' }
-              : x
-          ),
-        },
-        ctx
-      )
+      parseAnyOf({ ...objectSchema, anyOf: anyOf.map(open) }, ctx)
     );
   }
 
-  if (its.a.oneOf(objectSchema)) {
+  if (oneOf) {
     output = backend.intersection(
       output,
-      parseOneOf(
-        {
-          ...objectSchema,
-          oneOf: objectSchema.oneOf.map(x =>
-            typeof x === 'object' &&
-            !x.type &&
-            (x.properties ?? x.additionalProperties ?? x.patternProperties)
-              ? { ...x, type: 'object' }
-              : x
-          ),
-        },
-        ctx
-      )
+      parseOneOf({ ...objectSchema, oneOf: oneOf.map(open) }, ctx)
     );
   }
 
-  if (its.an.allOf(objectSchema)) {
+  if (allOf) {
     output = backend.intersection(
       output,
-      parseAllOf(
-        {
-          ...objectSchema,
-          allOf: objectSchema.allOf.map(x =>
-            typeof x === 'object' &&
-            !x.type &&
-            (x.properties ?? x.additionalProperties ?? x.patternProperties)
-              ? { ...x, type: 'object' }
-              : x
-          ),
-        },
-        ctx
-      )
+      parseAllOf({ ...objectSchema, allOf: allOf.map(open) }, ctx)
     );
+  }
+
+  if (sharesKeysWithBranches) {
+    const declaredKeys = new Set([
+      ...Object.keys(normalizedSchema.properties ?? {}),
+      ...closedBranches.flatMap(branch => Object.keys(branch.properties)),
+    ]);
+
+    output = backend.superRefine<unknown>(output, (value, issues) => {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return;
+      const unrecognizedKeys = Object.keys(value).filter(key => !declaredKeys.has(key));
+      if (unrecognizedKeys.length > 0) {
+        issues.unrecognizedKeys(
+          unrecognizedKeys,
+          `Unrecognized key(s) in object: ${unrecognizedKeys.map(key => `'${key}'`).join(', ')}`
+        );
+      }
+    });
   }
 
   return output;

@@ -23,7 +23,7 @@ const ensureOriginalIndex = (arr: JsonSchema[]) => {
   return newArr;
 };
 
-const isClosedObjectBranch = (
+export const isClosedObjectBranch = (
   branch: JsonSchema
 ): branch is JsonSchemaObject & { properties: Record<string, JsonSchema> } =>
   typeof branch === 'object' &&
